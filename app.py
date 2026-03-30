@@ -1,5 +1,6 @@
 import io
 import re
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import openpyxl
@@ -21,8 +22,10 @@ La app:
 - acomoda cada archivo aunque no tenga el mismo orden de columnas,
 - deja en blanco las columnas faltantes,
 - agrega al final las columnas extra que no existan en el layout,
-- resalta esas columnas extra con otro color,
-- deja la **fila 2 en blanco** y comienza los datos desde la **fila 3**.
+- coloca **Archivo origen** al **final final**,
+- resalta las columnas extra con otro color,
+- deja la **fila 2 en blanco** y comienza los datos desde la **fila 3**,
+- respeta los importes numéricos con formato **0.00**.
 """
 )
 
@@ -45,6 +48,8 @@ BORDER = Border(
     bottom=Side(style="thin", color="D9D9D9"),
 )
 
+MONEY_NUMBER_FORMAT = "0.00"
+
 
 def clean_header(value):
     if value is None:
@@ -57,6 +62,49 @@ def clean_header(value):
 def validate_extension(uploaded_file):
     ext = Path(uploaded_file.name).suffix.lower()
     return ext in SUPPORTED_EXTENSIONS
+
+
+def is_effectively_empty_row(row):
+    for value in row:
+        if value not in (None, ""):
+            return False
+    return True
+
+
+def normalize_decimal_value(value):
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, Decimal):
+        return value.quantize(Decimal("0.01"))
+
+    if isinstance(value, (int, float)):
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+
+        # Conserva textos comunes que no son importes
+        if re.search(r"[A-Za-z]", text):
+            return None
+
+        # Limpieza básica para números con separadores
+        cleaned = text.replace(",", "")
+        try:
+            return Decimal(cleaned).quantize(Decimal("0.01"))
+        except InvalidOperation:
+            return None
+
+    return None
+
+
+def apply_numeric_money_format(cell):
+    decimal_value = normalize_decimal_value(cell.value)
+    if decimal_value is not None:
+        cell.value = float(decimal_value)
+        cell.number_format = MONEY_NUMBER_FORMAT
 
 
 @st.cache_data(show_spinner=False)
@@ -82,7 +130,10 @@ def read_workbook_headers_and_rows(file_bytes: bytes, filename: str):
         row = list(row)
         if len(row) < len(headers):
             row += [None] * (len(headers) - len(row))
-        rows.append(row[:len(headers)])
+        row = row[:len(headers)]
+        if is_effectively_empty_row(row):
+            continue
+        rows.append(row)
 
     return {
         "filename": filename,
@@ -112,9 +163,9 @@ def build_output_workbook(layout_headers, processed_files, include_source_col=Tr
                 extras_in_order.append(header)
 
     final_headers = list(normalized_layout)
+    final_headers.extend(extras_in_order)
     if include_source_col:
         final_headers.append("Archivo origen")
-    final_headers.extend(extras_in_order)
 
     # encabezado fila 1
     for col_idx, header in enumerate(final_headers, start=1):
@@ -143,12 +194,12 @@ def build_output_workbook(layout_headers, processed_files, include_source_col=Tr
                 idx = header_to_index.get(layout_header)
                 output_values.append(source_row[idx] if idx is not None and idx < len(source_row) else None)
 
-            if include_source_col:
-                output_values.append(file_data["filename"])
-
             for extra_header in extras_in_order:
                 idx = header_to_index.get(extra_header)
                 output_values.append(source_row[idx] if idx is not None and idx < len(source_row) else None)
+
+            if include_source_col:
+                output_values.append(file_data["filename"])
 
             for col_idx, value in enumerate(output_values, start=1):
                 cell = ws_out.cell(row=output_row, column=col_idx, value=value)
@@ -160,6 +211,9 @@ def build_output_workbook(layout_headers, processed_files, include_source_col=Tr
                     cell.fill = SOURCE_DATA_FILL
                 elif header_name in extras_in_order:
                     cell.fill = EXTRA_DATA_FILL
+
+                if header_name != "Archivo origen":
+                    apply_numeric_money_format(cell)
 
             output_row += 1
 
@@ -229,7 +283,7 @@ source_files = st.file_uploader(
 include_source_col = st.checkbox(
     "Agregar columna 'Archivo origen' al resultado",
     value=True,
-    help="Útil para identificar de qué archivo salió cada registro.",
+    help="Se colocará al final final del archivo para que sea la última columna.",
 )
 
 if source_files:
