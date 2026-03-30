@@ -25,7 +25,9 @@ La app:
 - coloca **Archivo origen** al **final final**,
 - resalta las columnas extra con otro color,
 - deja la **fila 2 en blanco** y comienza los datos desde la **fila 3**,
-- respeta los importes numéricos con formato **0.00**.
+- aplica formato **general** de **A a AJ**,
+- si una columna de **A a AJ** contiene la palabra **fecha**, la exporta como **fecha corta**,
+- de **AK en adelante** aplica formato numérico **0.00**.
 """
 )
 
@@ -49,6 +51,8 @@ BORDER = Border(
 )
 
 MONEY_NUMBER_FORMAT = "0.00"
+SHORT_DATE_FORMAT = "dd/mm/yyyy"
+GENERAL_LIMIT_INDEX = 36  # AJ
 
 
 def clean_header(value):
@@ -86,11 +90,9 @@ def normalize_decimal_value(value):
         if not text:
             return None
 
-        # Conserva textos comunes que no son importes
         if re.search(r"[A-Za-z]", text):
             return None
 
-        # Limpieza básica para números con separadores
         cleaned = text.replace(",", "")
         try:
             return Decimal(cleaned).quantize(Decimal("0.01"))
@@ -100,11 +102,29 @@ def normalize_decimal_value(value):
     return None
 
 
-def apply_numeric_money_format(cell):
+def header_looks_like_date(header_name):
+    header_name = clean_header(header_name).lower()
+    return "fecha" in header_name
+
+
+def apply_output_format(cell, header_name, col_idx):
+    # A a AJ = general, excepto headers con "fecha" -> fecha corta
+    if col_idx <= GENERAL_LIMIT_INDEX:
+        if header_looks_like_date(header_name):
+            cell.number_format = SHORT_DATE_FORMAT
+        else:
+            cell.number_format = "General"
+        return
+
+    # AK en adelante = 0.00, excepto Archivo origen
+    if header_name == "Archivo origen":
+        cell.number_format = "General"
+        return
+
     decimal_value = normalize_decimal_value(cell.value)
     if decimal_value is not None:
         cell.value = float(decimal_value)
-        cell.number_format = MONEY_NUMBER_FORMAT
+    cell.number_format = MONEY_NUMBER_FORMAT
 
 
 @st.cache_data(show_spinner=False)
@@ -202,18 +222,18 @@ def build_output_workbook(layout_headers, processed_files, include_source_col=Tr
                 output_values.append(file_data["filename"])
 
             for col_idx, value in enumerate(output_values, start=1):
+                header_name = final_headers[col_idx - 1]
+
                 cell = ws_out.cell(row=output_row, column=col_idx, value=value)
                 cell.alignment = Alignment(vertical="center", wrap_text=True)
                 cell.border = BORDER
 
-                header_name = final_headers[col_idx - 1]
                 if header_name == "Archivo origen":
                     cell.fill = SOURCE_DATA_FILL
                 elif header_name in extras_in_order:
                     cell.fill = EXTRA_DATA_FILL
 
-                if header_name != "Archivo origen":
-                    apply_numeric_money_format(cell)
+                apply_output_format(cell, header_name, col_idx)
 
             output_row += 1
 
